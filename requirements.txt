@@ -1,0 +1,33 @@
+# ============================================================
+# Money Banque LLC — Python Dependencies
+# Install: pip install -r requirements.txt
+# Python:  3.12+  |  OS: Ubuntu 22.04 LTS (VPS)
+# ============================================================
+
+# ── Solana / Blockchain ──────────────────────────────────────
+solders>=0.21.0          # Solana types (Keypair, VersionedTransaction, Message)
+solana>=0.34.0           # Solana RPC client (async)
+
+# ── X / Twitter API v2 ──────────────────────────────────────
+tweepy>=4.14.0           # Campaign search + posting (OAuth 1.0a)
+requests>=2.31.0         # X v2 media upload (multipart, OAuth 1.0a)
+
+# ── Networking ───────────────────────────────────────────────
+httpx>=0.27.0            # PumpPortal + Pinata + RPC + LLM APIs
+websockets>=12.0         # PumpPortal real-time data stream
+
+# ── Config / Logging ─────────────────────────────────────────
+python-dotenv>=1.0.1     # .env file loader
+structlog>=24.2.0        # Structured JSON logging
+
+# ── Alerts / Notifications ───────────────────────────────────
+python-telegram-bot>=21.4  # Telegram alerts + 1-click approvals
+discord.py>=2.4.0          # Discord launch alerts
+
+# ── Scripts ─────────────────────────────────────────────────
+Pillow>=10.0.0           # scripts/launch_meme.py image conversion
+
+# ── Testing ─────────────────────────────────────────────────
+pytest>=8.2.0
+pytest-asyncio>=0.23.7
+pytest-timeout>=2.3.1

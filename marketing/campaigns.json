@@ -1,0 +1,57 @@
+{
+  "frog": {
+    "enabled": true,
+    "account": "ELORA",
+    "brief": "Elora's first meme: the high-school frog and girl meme",
+    "query": "(frog OR froggy) (meme OR girl OR \"high school\") -is:retweet -is:reply lang:en",
+    "keywords": ["frog", "froggy"],
+    "exclude_keywords": ["giveaway", "airdrop", "nsfw"],
+    "min_engagement": 100,
+    "tag_accounts": [],
+    "media": "",
+    "link": "",
+    "hashtags": ["#frog", "#meme"],
+    "hooks": [
+      "Every school had one frog legend 🐸",
+      "The frog has entered the chat 🐸",
+      "Main character energy: the frog 🐸"
+    ],
+    "template": "{hook}\n\nvia {author} {tags}\n{link}\n{source_url}\n\n{hashtags}"
+  },
+  "squirrel": {
+    "enabled": false,
+    "account": "ELORA",
+    "brief": "Squirrel meme campaign",
+    "query": "(squirrel OR squirrels) -is:retweet -is:reply lang:en has:media",
+    "keywords": ["squirrel"],
+    "exclude_keywords": ["giveaway", "airdrop", "nsfw"],
+    "min_engagement": 100,
+    "tag_accounts": [],
+    "media": "",
+    "link": "",
+    "hashtags": ["#squirrel", "#meme"],
+    "hooks": [
+      "Squirrel season is here 🐿️",
+      "Nobody grinds like a squirrel 🐿️"
+    ],
+    "template": "{hook}\n\nvia {author} {tags}\n{link}\n{source_url}\n\n{hashtags}"
+  },
+  "rat": {
+    "enabled": false,
+    "account": "ELORA",
+    "brief": "Rat meme campaign",
+    "query": "(rat OR rats) -is:retweet -is:reply lang:en has:media",
+    "keywords": ["rat", "rats"],
+    "exclude_keywords": ["giveaway", "airdrop", "nsfw", "poison"],
+    "min_engagement": 100,
+    "tag_accounts": [],
+    "media": "",
+    "link": "",
+    "hashtags": ["#rat", "#meme"],
+    "hooks": [
+      "Rat race? We call it a rat rally 🐀",
+      "The rats are winning today 🐀"
+    ],
+    "template": "{hook}\n\nvia {author} {tags}\n{link}\n{source_url}\n\n{hashtags}"
+  }
+}
