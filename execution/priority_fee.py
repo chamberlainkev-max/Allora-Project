@@ -23,10 +23,14 @@ _PUMPFUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 _COMPUTE_UNITS = 200_000
 
 
+# Fallback when RPC has no getPriorityFeeEstimate (public RPCs) or Helius is down.
+_FALLBACK_PRIORITY_FEE_SOL = 0.00005
+
+
 async def calculate_priority_fee_sol(rpc: SolanaRPCClient) -> float:
     """
     Return the recommended total priority fee in SOL.
-    Returns 0.0 if the estimate is unavailable.
+    Falls back to a small fixed fee when the estimate RPC method is unavailable.
     """
     try:
         estimate = await rpc.get_priority_fee_estimate([_PUMPFUN_PROGRAM_ID], settings.PRIORITY_FEE_LEVEL)
@@ -40,5 +44,6 @@ async def calculate_priority_fee_sol(rpc: SolanaRPCClient) -> float:
         )
         return fee_sol
     except Exception as exc:
-        log.error("priority_fee_error", reason=str(exc))
-        return 0.0
+        # Avoid multi-endpoint retry storms on "Method not found" — fixed fee is enough to land.
+        log.warning("priority_fee_fallback", reason=str(exc)[:160], fee_sol=_FALLBACK_PRIORITY_FEE_SOL)
+        return _FALLBACK_PRIORITY_FEE_SOL

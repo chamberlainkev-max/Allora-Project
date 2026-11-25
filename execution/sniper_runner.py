@@ -36,10 +36,12 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
 from config import settings
+from execution.atomic_json import load_json_dict, write_json_atomic
 from execution.priority_fee import calculate_priority_fee_sol
 from execution.rpc_client import SolanaRPCClient
 from execution.terminal_sniper import TerminalSniper
-from integrations.pumpfun_client import PumpFunClient, sign_transaction
+from execution.tx_verify import TxExpectation, UnsafeTransactionError
+from integrations.pumpfun_client import PumpFunClient, sign_transaction_async
 from integrations.telegram_client import TelegramClient
 from logging_config.logger import get_logger
 
@@ -208,7 +210,9 @@ class SniperRunner:
         self._buy_lock = asyncio.Lock()                # one buy at a time: size is read from the live balance
         self._priority_fee_sol = 0.0                   # refreshed off the hot path by housekeeping
         self._loss_limit_alerted = False
+        self._pending: dict[str, dict] = {}  # signature → pending trade (F02)
         self._load_positions()
+        self._load_pending()
 
     async def start(self) -> None:
         if not self._sniper.config.enabled:
@@ -219,6 +223,7 @@ class SniperRunner:
 
         self._running = True
         await self._rpc.connect()
+        await self._reconcile_pending()
         await self._refresh_priority_fee()
         if self._owns_telegram:
             try:
@@ -227,7 +232,7 @@ class SniperRunner:
                 log.warning("telegram_connect_failed", reason=str(exc))
 
         log.info("sniper_runner_started", wallet=self._wallet_pubkey, open_positions=len(self._positions),
-                 **self._sniper.get_status())
+                 pending=len(self._pending), **self._sniper.get_status())
         try:
             await asyncio.gather(self._stream(), self._scan(), self._housekeeping())
         finally:
@@ -243,24 +248,96 @@ class SniperRunner:
     # Position persistence + trade journal
     # -----------------------------------------------------------
     def _load_positions(self) -> None:
-        if not os.path.exists(settings.SNIPER_STATE_FILE):
-            return
-        with open(settings.SNIPER_STATE_FILE, encoding="utf-8") as fh:
-            self._positions = json.load(fh)
+        # F03 — recover from primary or .bak if a crash left corrupt/missing JSON.
+        self._positions = load_json_dict(settings.SNIPER_STATE_FILE)
         now = time.time()
         for mint, position in self._positions.items():
             self._tracked[mint] = {"curve_key": _bonding_curve_key(mint), "v_tokens": 0.0, "changed": now, "created": now}
-            self._metadata[mint] = (position["symbol"], "")
+            self._metadata[mint] = (position.get("symbol", ""), "")
             self._attempted.add(mint)
         if self._positions:
             log.info("sniper_positions_restored", mints=list(self._positions))
 
     def _save_positions(self) -> None:
-        os.makedirs(os.path.dirname(settings.SNIPER_STATE_FILE) or ".", exist_ok=True)
-        tmp = f"{settings.SNIPER_STATE_FILE}.tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(self._positions, fh)
-        os.replace(tmp, settings.SNIPER_STATE_FILE)
+        # F03 — fsync + .bak so a crash mid-write cannot wipe open positions.
+        write_json_atomic(settings.SNIPER_STATE_FILE, self._positions)
+
+    def _load_pending(self) -> None:
+        self._pending = load_json_dict(settings.SNIPER_PENDING_FILE)
+        if self._pending:
+            log.info("sniper_pending_restored", signatures=list(self._pending))
+
+    def _save_pending(self) -> None:
+        write_json_atomic(settings.SNIPER_PENDING_FILE, self._pending)
+
+    def _set_pending(self, signature: str, record: dict) -> None:
+        self._pending[signature] = record
+        self._save_pending()
+
+    def _clear_pending(self, signature: str) -> None:
+        if signature in self._pending:
+            del self._pending[signature]
+            self._save_pending()
+
+    async def _reconcile_pending(self) -> None:
+        """On startup: resolve any in-flight signatures left from a previous crash (F02)."""
+        for signature, record in list(self._pending.items()):
+            mint = record.get("mint", "")
+            action = record.get("action", "")
+            symbol = record.get("symbol", mint[:8] if mint else "?")
+            try:
+                resolved = await self._resolve_uncertain_tx(signature, mint, action)
+            except Exception as exc:
+                log.warning("sniper_pending_reconcile_error", signature=signature, reason=str(exc))
+                continue
+
+            if action == "buy" and mint and mint not in self._positions:
+                bal = await self._token_ui_amount(mint)
+                if resolved or (bal is not None and bal > 0):
+                    fill = await self._read_fill(signature, mint) if not signature.startswith("recovered-") else None
+                    tokens = fill["token_change"] if fill else (bal or 0.0)
+                    spent = -fill["sol_change"] if fill else float(record.get("amount_sol") or 0.0)
+                    if tokens > 0 and spent > 0:
+                        now = time.time()
+                        self._positions[mint] = {
+                            "symbol": symbol,
+                            "spent_sol": spent,
+                            "tokens": tokens,
+                            "value_sol": spent,
+                            "entry_time": float(record.get("submitted_at") or now),
+                            "entry_price": None,
+                            "last_price": None,
+                            "buy_fees_sol": None,
+                            "signature": signature,
+                        }
+                        self._tracked[mint] = {
+                            "curve_key": _bonding_curve_key(mint),
+                            "v_tokens": 0.0,
+                            "changed": now,
+                            "created": now,
+                        }
+                        self._metadata[mint] = (symbol, "")
+                        self._attempted.add(mint)
+                        self._save_positions()
+                        self._journal("buy_recovered_pending", mint=mint, symbol=symbol, signature=signature,
+                                      spent_sol=spent, tokens=tokens)
+                        log.warning("snipe_buy_recovered_pending", mint=mint, symbol=symbol, signature=signature)
+
+            elif action == "sell" and mint and mint in self._positions:
+                bal = await self._token_ui_amount(mint)
+                if resolved or bal == 0.0:
+                    del self._positions[mint]
+                    self._save_positions()
+                    await self._untrack([mint])
+                    self._journal("sell_recovered_pending", mint=mint, symbol=symbol, signature=signature)
+                    log.warning("snipe_sell_recovered_pending", mint=mint, symbol=symbol, signature=signature)
+
+            # Drop resolved or definitively failed entries; keep unknown ones for later.
+            landed = await self._rpc.signature_succeeded(signature)
+            if landed is not None or (action == "buy" and mint in self._positions) or (
+                action == "sell" and mint not in self._positions
+            ):
+                self._clear_pending(signature)
 
     @staticmethod
     def _journal(event: str, **fields) -> None:
@@ -481,6 +558,32 @@ class SniperRunner:
     # -----------------------------------------------------------
     # Trade execution
     # -----------------------------------------------------------
+    async def _resolve_uncertain_tx(self, signature: str, mint: str, action: str) -> str | None:
+        """
+        F02 — after confirm timeout / uncertain send: decide if the tx actually landed.
+        Returns the signature string if the trade should be treated as successful.
+        """
+        landed = await self._rpc.signature_succeeded(signature)
+        if landed is True:
+            log.info("snipe_tx_recovered_status", action=action, mint=mint, signature=signature)
+            return signature
+        if landed is False:
+            return None
+
+        # Status unknown — for buys, wallet token balance is the source of truth.
+        if action == "buy" and mint:
+            bal = await self._token_ui_amount(mint)
+            if bal is not None and bal > 0:
+                log.warning(
+                    "snipe_tx_recovered_balance",
+                    action=action,
+                    mint=mint,
+                    signature=signature,
+                    token_balance=bal,
+                )
+                return signature
+        return None
+
     async def _execute_trade(
         self,
         mint: str,
@@ -489,8 +592,9 @@ class SniperRunner:
         slippage_pct: int,
         denominated_in_sol: bool,
         pool: str,
+        symbol: str = "",
     ) -> str | None:
-        """Build (PumpPortal) → sign locally → submit → confirm. Returns signature if confirmed."""
+        """Build (PumpPortal) → verify+sign → submit → confirm/recover. Returns signature if filled."""
         self._empty_sell = False
         for attempt in range(1, _TRADE_ATTEMPTS + 1):
             try:
@@ -510,19 +614,56 @@ class SniperRunner:
                 continue
 
             try:
-                signature = await self._rpc.send_raw_transaction(sign_transaction(unsigned, [self._wallet]))
+                signed = await sign_transaction_async(
+                    unsigned,
+                    [self._wallet],
+                    TxExpectation(wallet_pubkey=self._wallet_pubkey, action=action, mint=mint),
+                    self._rpc,
+                )
+            except UnsafeTransactionError as exc:
+                log.error("snipe_tx_rejected", action=action, mint=mint, reason=str(exc))
+                self._journal("tx_rejected", action=action, mint=mint, reason=str(exc))
+                return None
+
+            signature = None
+            try:
+                signature = await self._rpc.send_raw_transaction(signed)
             except Exception as exc:
                 log.warning("snipe_tx_send_error", action=action, mint=mint, attempt=attempt, reason=str(exc))
                 # A buy that errored on send may still land — never risk buying twice.
                 if action == "buy" or (action == "sell" and _empty_sell_error(str(exc))):
                     self._empty_sell = action == "sell"
+                    # F02: even without a local signature, check whether tokens appeared.
+                    if action == "buy":
+                        bal = await self._token_ui_amount(mint)
+                        if bal is not None and bal > 0:
+                            log.warning("snipe_buy_landed_without_sig", mint=mint, token_balance=bal)
+                            self._journal("buy_recovered_no_sig", mint=mint, symbol=symbol, tokens=bal)
+                            return f"recovered-no-sig:{mint}"
                     return None
                 await asyncio.sleep(0.5)
                 continue
 
+            sig_str = str(signature)
+            self._set_pending(sig_str, {
+                "mint": mint,
+                "action": action,
+                "symbol": symbol,
+                "amount_sol": amount if isinstance(amount, (int, float)) else None,
+                "submitted_at": time.time(),
+            })
+
             if await self._rpc.confirm_transaction(signature):
-                return str(signature)
-            log.error("snipe_tx_not_confirmed", action=action, mint=mint, signature=str(signature))
+                self._clear_pending(sig_str)
+                return sig_str
+
+            log.error("snipe_tx_not_confirmed", action=action, mint=mint, signature=sig_str)
+            recovered = await self._resolve_uncertain_tx(sig_str, mint, action)
+            if recovered:
+                self._clear_pending(sig_str)
+                self._journal("tx_recovered_after_timeout", action=action, mint=mint, signature=sig_str)
+                return recovered
+            # Keep pending on disk so restart reconciliation can still recover (F02).
             return None
         return None
 
@@ -615,18 +756,28 @@ class SniperRunner:
                          curve_pct=signal["curve_pct"])
                 signature = await self._execute_trade(
                     mint, "buy", amount_sol, settings.SNIPER_BUY_SLIPPAGE_PCT,
-                    denominated_in_sol=True, pool="pump",
+                    denominated_in_sol=True, pool="pump", symbol=symbol,
                 )
             confirmed_at = time.time()
             if not signature:
-                log.error("snipe_buy_failed", mint=mint, symbol=symbol)
-                self._journal("buy_failed", mint=mint, symbol=symbol, amount_sol=amount_sol)
-                await self._untrack([mint])
-                return
-
-            fill = await self._read_fill(signature, mint)
-            spent_sol = -fill["sol_change"] if fill else amount_sol
-            tokens = fill["token_change"] if fill else 0.0
+                # F02 last check: tokens may have arrived even if confirm timed out.
+                bal = await self._token_ui_amount(mint)
+                if bal is not None and bal > 0:
+                    log.warning("snipe_buy_orphan_recovered", mint=mint, symbol=symbol, tokens=bal)
+                    self._journal("buy_orphan_recovered", mint=mint, symbol=symbol, tokens=bal, amount_sol=amount_sol)
+                    signature = f"recovered-balance:{mint}"
+                    spent_sol = amount_sol
+                    tokens = bal
+                    fill = None
+                else:
+                    log.error("snipe_buy_failed", mint=mint, symbol=symbol)
+                    self._journal("buy_failed", mint=mint, symbol=symbol, amount_sol=amount_sol)
+                    await self._untrack([mint])
+                    return
+            else:
+                fill = await self._read_fill(signature, mint) if not str(signature).startswith("recovered-") else None
+                spent_sol = -fill["sol_change"] if fill else amount_sol
+                tokens = fill["token_change"] if fill else (await self._token_ui_amount(mint) or 0.0)
             report = _fill_report(fill, tokens, signal["price"])
             buy_fees = (report["protocol_fees_sol"] + report["network_fee_sol"]
                         if report["protocol_fees_sol"] is not None else None)
@@ -706,7 +857,7 @@ class SniperRunner:
         try:
             signature = await self._execute_trade(
                 mint, "sell", "100%", settings.SNIPER_SELL_SLIPPAGE_PCT,
-                denominated_in_sol=False, pool="auto",
+                denominated_in_sol=False, pool="auto", symbol=symbol,
             )
             confirmed_at = time.time()
             if not signature:

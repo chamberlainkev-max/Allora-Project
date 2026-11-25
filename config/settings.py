@@ -130,8 +130,32 @@ SNIPER_WATCH_PCT: float = _float("SNIPER_WATCH_PCT", 0.0)
 SNIPER_TRACK_IDLE_SECONDS: int = _int("SNIPER_TRACK_IDLE_SECONDS", 180)
 # Open positions are saved here so a restart keeps managing them
 SNIPER_STATE_FILE: str = _str("SNIPER_STATE_FILE", "logs/sniper_positions.json")
+# In-flight buy/sell signatures awaiting confirmation (F02 pending ledger)
+SNIPER_PENDING_FILE: str = _str("SNIPER_PENDING_FILE", "logs/sniper_pending.json")
 # Trade journal (JSON lines): signals, missed opportunities, fills, fees, net P&L
 SNIPER_TRADE_LOG: str = _str("SNIPER_TRADE_LOG", "logs/sniper_trades.jsonl")
+# F04 — single-instance locks (second launch / bad restart must not stack workers)
+SNIPER_LOCK_FILE: str = _str("SNIPER_LOCK_FILE", "logs/sniper.lock")
+ELORA_LOCK_FILE: str = _str("ELORA_LOCK_FILE", "logs/elora.lock")
+
+# ---------------------------------------------------------------
+# Trade pool (Kevin self-buy wallets — NOT wash / fake volume)
+# ---------------------------------------------------------------
+# Vault of 100 keypairs (gitignored secrets/). Generate once, never commit.
+TRADE_POOL_WALLETS_FILE: str = _str("TRADE_POOL_WALLETS_FILE", "secrets/trade_pool_wallets.json")
+TRADE_POOL_STATE_FILE: str = _str("TRADE_POOL_STATE_FILE", "logs/trade_pool_state.json")
+# Working capital per wallet (~0.10–0.15 SOL per Kevin's sheet)
+TRADE_POOL_SOL_PER_WALLET: float = _float("TRADE_POOL_SOL_PER_WALLET", 0.12)
+TRADE_POOL_BUY_SOL: float = _float("TRADE_POOL_BUY_SOL", 0.10)
+TRADE_POOL_BUY_SLIPPAGE_PCT: int = _int("TRADE_POOL_BUY_SLIPPAGE_PCT", 10)
+TRADE_POOL_STAGGER_SECONDS: float = _float("TRADE_POOL_STAGGER_SECONDS", 1.5)
+# Fail-closed: tiers off unless both state file AND env say true
+TRADE_POOL_TIER_10_ENABLED: bool = _bool("TRADE_POOL_TIER_10_ENABLED", False)
+TRADE_POOL_TIER_20_ENABLED: bool = _bool("TRADE_POOL_TIER_20_ENABLED", False)
+TRADE_POOL_TIER_50_ENABLED: bool = _bool("TRADE_POOL_TIER_50_ENABLED", False)
+TRADE_POOL_TIER_100_ENABLED: bool = _bool("TRADE_POOL_TIER_100_ENABLED", False)
+# Required mint for live buys (empty = refuse live runs)
+TRADE_POOL_ALLOWED_MINT: str = _str("TRADE_POOL_ALLOWED_MINT")
 
 # ---------------------------------------------------------------
 # Audit scripts

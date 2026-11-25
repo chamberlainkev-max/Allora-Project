@@ -9,9 +9,10 @@ own wallet, so the two systems never share config, wallets or runtime.
 
 Startup sequence:
   1. Structured logging
-  2. Telegram (previews + 1-click approvals)
-  3. Marketing bot under a ServiceWatchdog — only if MARKETING_ENABLED
-  4. Run until SIGINT / SIGTERM, then shut down cleanly
+  2. F04 process lock (single Elora instance)
+  3. Telegram (previews + 1-click approvals)
+  4. Marketing bot under a ServiceWatchdog — only if MARKETING_ENABLED
+  5. Run until SIGINT / SIGTERM, then shut down cleanly
 """
 
 import asyncio
@@ -28,9 +29,17 @@ from config import settings
 from integrations.telegram_client import TelegramClient
 from marketing.publisher import MarketingBot
 from shield.fail_safe import ServiceWatchdog
+from shield.process_lock import ProcessLock, ProcessLockError
 
 
 async def main() -> None:
+    lock = ProcessLock(settings.ELORA_LOCK_FILE)
+    try:
+        lock.acquire()
+    except ProcessLockError as exc:
+        log.error("elora_already_running", reason=str(exc))
+        raise SystemExit(1) from exc
+
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -39,30 +48,33 @@ async def main() -> None:
         except NotImplementedError:
             pass  # Windows: Ctrl+C arrives as KeyboardInterrupt / CancelledError instead
 
-    log.info("system_starting", env=settings.ENV)
-    telegram = TelegramClient()
-    await telegram.connect()
-
-    marketing_bot = None
-    watchdog = None
-    if settings.MARKETING_ENABLED:
-        marketing_bot = MarketingBot(telegram=telegram)
-        watchdog = ServiceWatchdog("marketing_bot", marketing_bot.start, restart_delay=60.0)
-        await watchdog.start()
-    else:
-        log.info("marketing_bot_skipped", reason="MARKETING_ENABLED != true")
-
     try:
-        log.info("system_running", hint="Press Ctrl+C to stop")
-        await shutdown_event.wait()
+        log.info("system_starting", env=settings.ENV)
+        telegram = TelegramClient()
+        await telegram.connect()
+
+        marketing_bot = None
+        watchdog = None
+        if settings.MARKETING_ENABLED:
+            marketing_bot = MarketingBot(telegram=telegram)
+            watchdog = ServiceWatchdog("marketing_bot", marketing_bot.start, restart_delay=60.0)
+            await watchdog.start()
+        else:
+            log.info("marketing_bot_skipped", reason="MARKETING_ENABLED != true")
+
+        try:
+            log.info("system_running", hint="Press Ctrl+C to stop")
+            await shutdown_event.wait()
+        finally:
+            log.info("system_shutting_down")
+            if marketing_bot:
+                await marketing_bot.stop()
+            if watchdog:
+                await watchdog.stop()
+            await telegram.disconnect()
+            log.info("system_stopped")
     finally:
-        log.info("system_shutting_down")
-        if marketing_bot:
-            await marketing_bot.stop()
-        if watchdog:
-            await watchdog.stop()
-        await telegram.disconnect()
-        log.info("system_stopped")
+        lock.release()
 
 
 if __name__ == "__main__":

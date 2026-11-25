@@ -13,7 +13,9 @@ import asyncio
 import base64
 import httpx
 from solders.keypair import Keypair
-from integrations.pumpfun_client import PumpFunClient, sign_transaction
+from execution.rpc_client import SolanaRPCClient
+from execution.tx_verify import TxExpectation
+from integrations.pumpfun_client import PumpFunClient, sign_transaction_async
 from config import settings
 
 _LYC_MINT = "HJjWmTp5bR4YYKpCtVW9nJ4qmoL9AgqL6JnNJEYW9nBm"
@@ -73,7 +75,13 @@ async def reclaim(sell_lyc: bool = False):
                 denominated_in_sol=False,
                 pool="pump"
             )
-            signed_tx = sign_transaction(tx_bytes, [wallet_kp])
+            async with SolanaRPCClient() as rpc:
+                signed_tx = await sign_transaction_async(
+                    tx_bytes,
+                    [wallet_kp],
+                    TxExpectation(wallet_pubkey=wallet_pubkey, action="sell", mint=mint),
+                    rpc,
+                )
 
             # Broadcast tx to Solana RPC
             async with httpx.AsyncClient(timeout=15) as http_client:

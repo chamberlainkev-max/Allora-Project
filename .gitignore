@@ -3,10 +3,13 @@
 *.key
 *.pem
 *.p12
+secrets/
 logs/
 *.mp4
 
 # ── Python ───────────────────────────────────────────────────
+venv/
+.venv/
 __pycache__/
 *.py[cod]
 *.pyo

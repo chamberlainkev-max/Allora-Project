@@ -29,6 +29,7 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
 from config import settings
+from execution.tx_verify import TxExpectation, verify_unsigned_transaction
 from logging_config.logger import get_logger
 
 log = get_logger(__name__)
@@ -46,12 +47,52 @@ _IPFS_GATEWAY = "https://ipfs.io/ipfs"
 
 
 # ---------------------------------------------------------------
-# Signing
+# Signing (F01 — verify before sign)
 # ---------------------------------------------------------------
-def sign_transaction(unsigned_tx_bytes: bytes, signers: list[Keypair]) -> bytes:
-    """Sign a PumpPortal VersionedTransaction locally with all required keypairs."""
+def sign_transaction(
+    unsigned_tx_bytes: bytes,
+    signers: list[Keypair],
+    expected: TxExpectation,
+    *,
+    lookup_addresses: dict | None = None,
+) -> bytes:
+    """
+    Verify the unsigned PumpPortal tx against the caller's intent, then sign locally.
+    For v0 txs with ALTs, pass lookup_addresses from RPC (or use sign_transaction_async).
+    Raises UnsafeTransactionError if verification fails (nothing is signed).
+    """
+    verify_unsigned_transaction(
+        unsigned_tx_bytes,
+        expected,
+        lookup_addresses=lookup_addresses,
+    )
     tx = VersionedTransaction.from_bytes(unsigned_tx_bytes)
+    log.info(
+        "tx_verified_for_signing",
+        action=expected.action,
+        mint=expected.mint[:12] + "...",
+        wallet=expected.wallet_pubkey[:12] + "...",
+        alt_tables=len(lookup_addresses or {}),
+    )
     return bytes(VersionedTransaction(tx.message, signers))
+
+
+async def sign_transaction_async(
+    unsigned_tx_bytes: bytes,
+    signers: list[Keypair],
+    expected: TxExpectation,
+    rpc,
+) -> bytes:
+    """Resolve any address-lookup tables via RPC, then verify + sign (F01)."""
+    tx = VersionedTransaction.from_bytes(unsigned_tx_bytes)
+    lookups = getattr(tx.message, "address_table_lookups", None) or []
+    lookup_addresses = await rpc.resolve_lookup_tables(tx.message) if lookups else None
+    return sign_transaction(
+        unsigned_tx_bytes,
+        signers,
+        expected,
+        lookup_addresses=lookup_addresses,
+    )
 
 
 # ---------------------------------------------------------------

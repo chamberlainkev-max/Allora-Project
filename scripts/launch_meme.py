@@ -24,7 +24,8 @@ from config import settings
 from execution.priority_fee import calculate_priority_fee_sol
 from execution.rpc_client import SolanaRPCClient
 from integrations.discord_client import DiscordClient
-from integrations.pumpfun_client import PumpFunClient, sign_transaction
+from execution.tx_verify import TxExpectation
+from integrations.pumpfun_client import PumpFunClient, sign_transaction_async
 from integrations.telegram_client import TelegramClient
 
 # Pump.fun creation costs ~0.02 SOL on top of the initial buy and network fees
@@ -67,12 +68,26 @@ async def launch(name: str, symbol: str, description: str, image_path: str, buy_
             priority_fee_sol=await calculate_priority_fee_sol(rpc),
             slippage_pct=settings.LAUNCH_SLIPPAGE_PCT,
         )
-        signature = await rpc.send_raw_transaction(sign_transaction(unsigned_tx, [wallet_kp, mint_kp]))
+        signed = await sign_transaction_async(
+            unsigned_tx,
+            [wallet_kp, mint_kp],
+            TxExpectation(
+                wallet_pubkey=str(wallet_kp.pubkey()),
+                action="create",
+                mint=str(mint_kp.pubkey()),
+            ),
+            rpc,
+        )
+        signature = await rpc.send_raw_transaction(signed)
         print(f"Submitted: {signature}")
 
         if not await rpc.confirm_transaction(signature):
-            print("Transaction was not confirmed.")
-            return
+            # F02-style: one more status check before declaring failure
+            landed = await rpc.signature_succeeded(signature)
+            if landed is not True:
+                print("Transaction was not confirmed.")
+                return
+            print("Recovered: transaction landed after confirm timeout.")
 
     mint = str(mint_kp.pubkey())
     print(f"LIVE: https://pump.fun/coin/{mint}")

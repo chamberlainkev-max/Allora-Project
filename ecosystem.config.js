@@ -19,6 +19,8 @@ const common = {
   watch: false,
   max_memory_restart: "512M",
   restart_delay: 3000,
+  // F04 — give the process time to release its lock / shut down before PM2 replaces it
+  kill_timeout: 10000,
   env: {
     ENV: "production",
     PYTHONUNBUFFERED: "1",
@@ -47,5 +49,24 @@ module.exports = {
       out_file: "logs/sniper-out.log",
       error_file: "logs/sniper-err.log",
     },
+    // ---- Kevin self-buy trade pool (one PM2 app per tier; off until enabled) ----
+    // Start a tier only after: ctl enable + env true + TRADE_POOL_ALLOWED_MINT set.
+    // Default args are dry-run; set TRADE_POOL_LIVE=true in env for live buys.
+    ...[10, 20, 50, 100].map((tier) => ({
+      ...common,
+      name: `trade-pool-${tier}`,
+      script: "scripts/run_trade_pool.py",
+      args: process.env.TRADE_POOL_LIVE === "true"
+        ? `--tier ${tier} --live`
+        : `--tier ${tier}`,
+      autorestart: false,
+      log_file: `logs/trade-pool-${tier}-combined.log`,
+      out_file: `logs/trade-pool-${tier}-out.log`,
+      error_file: `logs/trade-pool-${tier}-err.log`,
+      env: {
+        ...common.env,
+        [`TRADE_POOL_TIER_${tier}_ENABLED`]: process.env[`TRADE_POOL_TIER_${tier}_ENABLED`] || "false",
+      },
+    })),
   ],
 };

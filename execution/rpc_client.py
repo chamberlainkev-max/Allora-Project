@@ -13,11 +13,13 @@ Supported providers: Helius, QuickNode (URL from env).
 """
 
 import asyncio
+import base64
 from typing import Any
 
 import httpx
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
+from solders.address_lookup_table_account import AddressLookupTable
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 from solders.transaction_status import TransactionConfirmationStatus
@@ -131,11 +133,24 @@ class SolanaRPCClient:
         return await self._call("get_latest_blockhash")
 
     async def get_priority_fee_estimate(self, account_keys: list[str], priority_level: str) -> float:
-        """Helius getPriorityFeeEstimate → microlamports per compute unit."""
-        result = await self._raw_call(
-            "getPriorityFeeEstimate",
-            [{"accountKeys": account_keys, "options": {"priorityLevel": priority_level}}],
-        )
+        """Helius getPriorityFeeEstimate → microlamports per compute unit (single try, no failover storm)."""
+        async def _post() -> Any:
+            resp = await self._http.post(
+                self._urls[self._active_idx],
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getPriorityFeeEstimate",
+                    "params": [{"accountKeys": account_keys, "options": {"priorityLevel": priority_level}}],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                raise RuntimeError(f"RPC getPriorityFeeEstimate error: {data['error']}")
+            return data.get("result")
+
+        result = await _post()
         return float((result or {}).get("priorityFeeEstimate") or 0)
 
     async def get_multiple_accounts(self, pubkeys: list[str]) -> list[str | None]:
@@ -145,6 +160,26 @@ class SolanaRPCClient:
             [pubkeys, {"encoding": "base64", "commitment": "processed"}],
         )
         return [acc["data"][0] if acc else None for acc in (result or {}).get("value", [])]
+
+    async def resolve_lookup_tables(self, message) -> dict[str, list[Pubkey]]:
+        """
+        Fetch address-lookup tables referenced by a v0 message.
+        Returns {table_pubkey: [address, ...]} for F01 account-key expansion.
+        """
+        lookups = getattr(message, "address_table_lookups", None) or []
+        if not lookups:
+            return {}
+
+        table_ids = [str(lookup.account_key) for lookup in lookups]
+        raw_accounts = await self.get_multiple_accounts(table_ids)
+        resolved: dict[str, list[Pubkey]] = {}
+        for table_id, raw in zip(table_ids, raw_accounts):
+            if not raw:
+                raise RuntimeError(f"address lookup table not found: {table_id}")
+            data = base64.b64decode(raw)
+            table = AddressLookupTable.deserialize(data)
+            resolved[table_id] = list(table.addresses)
+        return resolved
 
     async def get_transaction(self, signature: str) -> dict | None:
         """Return a confirmed transaction (jsonParsed), or None if not yet indexed."""
@@ -172,7 +207,13 @@ class SolanaRPCClient:
         deadline = loop.time() + max_wait_secs
         while loop.time() < deadline:
             try:
-                resp = await self._call("get_signature_statuses", [signature])
+                # search_transaction_history=True avoids false timeouts when the
+                # signature has aged out of the recent status cache (F02).
+                resp = await self._call(
+                    "get_signature_statuses",
+                    [signature],
+                    search_transaction_history=True,
+                )
                 status = resp.value[0] if resp.value else None
                 if status is not None:
                     if status.err:
@@ -188,3 +229,32 @@ class SolanaRPCClient:
 
         log.error("tx_result", result="timeout", signature=str(signature), waited_secs=max_wait_secs)
         return False
+
+    async def signature_succeeded(self, signature: Signature | str) -> bool | None:
+        """
+        One-shot check whether a signature landed successfully.
+        True = success, False = on-chain error, None = not found / unknown yet.
+        """
+        if isinstance(signature, str):
+            signature = Signature.from_string(signature)
+        try:
+            resp = await self._call(
+                "get_signature_statuses",
+                [signature],
+                search_transaction_history=True,
+            )
+            status = resp.value[0] if resp.value else None
+            if status is None:
+                tx = await self.get_transaction(str(signature))
+                if tx is None:
+                    return None
+                err = (tx.get("meta") or {}).get("err")
+                return err is None
+            if status.err:
+                return False
+            if status.confirmation_status in _CONFIRMED_STATUSES:
+                return True
+            return None
+        except Exception as exc:
+            log.warning("rpc_error", reason=str(exc), context="signature_succeeded")
+            return None
